@@ -7,7 +7,7 @@ import { getCached, rateLimit, setCached } from "@/lib/guard";
 import type { AppMeta, Review, StreamEvent } from "@/lib/types";
 
 export const runtime = "nodejs";
-export const maxDuration = 120;
+export const maxDuration = 300; // retries and model fallbacks need headroom (Vercel Hobby max)
 
 const MAX_REVIEWS = 500;
 const MOCK = process.env.MOCK_MODE === "1";
@@ -114,7 +114,9 @@ export async function POST(req: Request) {
       } catch (e) {
         console.error(e);
         let message = e instanceof Error ? e.message : "Something went wrong.";
-        if (/rate_limit|overloaded|529|429|RESOURCE_EXHAUSTED|quota/i.test(message))
+        if (/\b(503|529)\b|UNAVAILABLE|overloaded|high demand/i.test(message) && !/^Gemini is busy/.test(message))
+          message = "The AI model is busy right now. Try again in a minute.";
+        else if (/rate_limit|\b429\b|RESOURCE_EXHAUSTED/i.test(message) && !/^The free AI quota/.test(message))
           message = "The free AI quota is used up for now. Try again in a few minutes, or tomorrow if the daily limit was hit.";
         if (/authentication|api key|API_KEY_INVALID|401|403/i.test(message) && !/_API_KEY set/.test(message))
           message = "The server's AI API key was rejected. Check the key in your environment variables.";
