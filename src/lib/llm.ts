@@ -97,13 +97,49 @@ function geminiSchema(node: unknown): unknown {
   return node;
 }
 
+// Free-tier models get busy at peak times. Try the main model, then fall back to others.
+const GEMINI_FALLBACKS = (process.env.GEMINI_FALLBACK_MODELS || "gemini-3.5-flash-lite,gemini-3.6-flash")
+  .split(",")
+  .map((m) => m.trim())
+  .filter(Boolean);
+
+const isTransient = (msg: string) =>
+  /\b(503|500|429)\b|UNAVAILABLE|RESOURCE_EXHAUSTED|INTERNAL|overloaded|high demand|quota|fetch failed|ECONNRESET/i.test(msg);
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 async function callGemini<T>(opts: StructuredCall): Promise<T> {
   if (!process.env.GEMINI_API_KEY) {
     throw new Error("The server has no GEMINI_API_KEY set. Add it in your environment variables and redeploy.");
   }
   gemini ??= new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-  const res = await gemini.models.generateContent({
-    model: GEMINI_MODEL,
+  const models = [...new Set([GEMINI_MODEL, ...GEMINI_FALLBACKS])];
+  let lastError: unknown = null;
+
+  for (const model of models) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        return await geminiOnce<T>(model, opts);
+      } catch (e) {
+        lastError = e;
+        const msg = e instanceof Error ? e.message : String(e);
+        if (!isTransient(msg)) throw e; // bad key, bad request, etc.: retrying won't help
+        console.warn(`Gemini ${model} attempt ${attempt + 1} failed: ${msg.slice(0, 200)}`);
+        if (attempt === 0) await sleep(1500);
+      }
+    }
+  }
+  const msg = lastError instanceof Error ? lastError.message : String(lastError);
+  throw new Error(
+    /429|RESOURCE_EXHAUSTED|quota/i.test(msg)
+      ? "The free AI quota is used up for now. Try again in a few minutes, or tomorrow if the daily limit was hit."
+      : "Gemini is busy right now. Try again in a minute."
+  );
+}
+
+async function geminiOnce<T>(model: string, opts: StructuredCall): Promise<T> {
+  const res = await gemini!.models.generateContent({
+    model,
     contents: opts.user,
     config: {
       systemInstruction: opts.system,
